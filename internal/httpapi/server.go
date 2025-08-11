@@ -2,7 +2,10 @@ package httpapi
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -59,16 +62,46 @@ func (s *Server) handleAddTarget(w http.ResponseWriter, r *http.Request) {
 
 	// Run a single check synchronously for immediate feedback
 	out := s.Checker.Check(p.URL)
+
+	// If HTTP check fails, run DNS check
+	dnsClass := ""
+	if !out.Up {
+		host := extractHost(p.URL)
+		dns := probe.CheckDNS(host)
+		dnsClass = dns.Class
+
+		// Log detailed DNS info
+		s.Logger.Info("dns_check",
+			zap.String("domain", dns.Domain),
+			zap.String("class", dns.Class),
+			zap.Bool("has_a_or_aaaa", dns.HasAOrAAAA),
+			zap.Strings("nameservers", dns.Nameservers),
+			zap.String("cname", dns.CNAME),
+			zap.String("resolver_error", dns.ResolverError),
+		)
+	}
+
+	// Combine reason with DNS class (if any)
+	reason := out.Reason
+	if dnsClass != "" {
+		reason = strings.TrimSpace(fmt.Sprintf("%s dns=%s", out.Reason, dnsClass))
+	}
+
 	cr := &domain.CheckResult{
 		TargetID:   t.ID,
 		Up:         out.Up,
 		HTTPStatus: out.StatusCode,
 		LatencyMS:  out.LatencyMS,
-		Reason:     out.Reason,
+		Reason:     reason,
 		CheckedAt:  time.Now().UTC(),
 	}
 	_ = s.Results.Append(r.Context(), cr)
-	s.Logger.Info("added_target", zap.String("url", p.URL), zap.Bool("up", out.Up), zap.Float64("latency_ms", out.LatencyMS))
+
+	s.Logger.Info("added_target",
+		zap.String("url", p.URL),
+		zap.Bool("up", out.Up),
+		zap.Float64("latency_ms", out.LatencyMS),
+	)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
@@ -84,4 +117,13 @@ func (s *Server) handleListTargets(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(ts)
+}
+
+// extractHost pulls the hostname from a URL string
+func extractHost(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return raw
+	}
+	return u.Hostname()
 }
