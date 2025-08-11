@@ -1,10 +1,9 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
@@ -21,11 +20,16 @@ type Server struct {
 	Logger  *zap.Logger
 	Targets repo.TargetStore
 	Results repo.ResultStore
-	Checker *probe.HTTPChecker
+	Checker *probe.MultiChecker
 }
 
-func NewServer(l *zap.Logger, ts repo.TargetStore, rs repo.ResultStore, c *probe.HTTPChecker) *Server {
-	return &Server{Logger: l, Targets: ts, Results: rs, Checker: c}
+func NewServer(l *zap.Logger, ts repo.TargetStore, rs repo.ResultStore, c *probe.MultiChecker) *Server {
+	return &Server{
+		Logger:  l,
+		Targets: ts,
+		Results: rs,
+		Checker: c,
+	}
 }
 
 func (s *Server) Router() http.Handler {
@@ -34,7 +38,7 @@ func (s *Server) Router() http.Handler {
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("ok"))
+		_, _ = w.Write([]byte("ok"))
 	})
 
 	r.Get("/api/targets", s.handleListTargets)
@@ -49,7 +53,7 @@ type addPayload struct {
 
 func (s *Server) handleAddTarget(w http.ResponseWriter, r *http.Request) {
 	var p addPayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.URL == "" {
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || strings.TrimSpace(p.URL) == "" {
 		http.Error(w, "bad payload", http.StatusBadRequest)
 		return
 	}
@@ -60,52 +64,48 @@ func (s *Server) handleAddTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Run a single check synchronously for immediate feedback
-	out := s.Checker.Check(p.URL)
+	// Run all registered checks (HTTP, DNS, ...).
+	results := s.Checker.Run(context.Background(), p.URL)
 
-	// If HTTP check fails, run DNS check
-	dnsClass := ""
-	if !out.Up {
-		host := extractHost(p.URL)
-		dns := probe.CheckDNS(host)
-		dnsClass = dns.Class
-
-		// Log detailed DNS info
-		s.Logger.Info("dns_check",
-			zap.String("domain", dns.Domain),
-			zap.String("class", dns.Class),
-			zap.Bool("has_a_or_aaaa", dns.HasAOrAAAA),
-			zap.Strings("nameservers", dns.Nameservers),
-			zap.String("cname", dns.CNAME),
-			zap.String("resolver_error", dns.ResolverError),
-		)
+	// Decide overall UP/DOWN: require HTTP success.
+	up := false
+	var httpLatency float64
+	for _, res := range results {
+		if res.Name == "HTTP" {
+			up = res.Success
+			httpLatency = res.LatencyMS
+			break
+		}
 	}
 
-	// Combine reason with DNS class (if any)
-	reason := out.Reason
-	if dnsClass != "" {
-		reason = strings.TrimSpace(fmt.Sprintf("%s dns=%s", out.Reason, dnsClass))
+	// Combine messages for a human-readable reason.
+	var parts []string
+	for _, res := range results {
+		parts = append(parts, res.Name+"="+res.Message)
 	}
+	reason := strings.Join(parts, " ")
 
 	cr := &domain.CheckResult{
-		TargetID:   t.ID,
-		Up:         out.Up,
-		HTTPStatus: out.StatusCode,
-		LatencyMS:  out.LatencyMS,
-		Reason:     reason,
-		CheckedAt:  time.Now().UTC(),
+		TargetID:  t.ID,
+		Up:        up,
+		LatencyMS: httpLatency, // HTTP latency if available
+		Reason:    reason,
+		CheckedAt: time.Now().UTC(),
 	}
 	_ = s.Results.Append(r.Context(), cr)
 
 	s.Logger.Info("added_target",
 		zap.String("url", p.URL),
-		zap.Bool("up", out.Up),
-		zap.Float64("latency_ms", out.LatencyMS),
+		zap.Bool("up", up),
+		zap.Float64("latency_ms", httpLatency),
+		zap.String("reason", reason),
 	)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"target": t, "result": cr,
+		"target":  t,
+		"results": results, // detailed per-check results
+		"summary": cr,      // overall interpretation
 	})
 }
 
@@ -117,13 +117,4 @@ func (s *Server) handleListTargets(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(ts)
-}
-
-// extractHost pulls the hostname from a URL string
-func extractHost(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.Hostname() == "" {
-		return raw
-	}
-	return u.Hostname()
 }

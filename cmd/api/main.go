@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"time"
 
 	"go.uber.org/zap"
 
@@ -22,7 +23,14 @@ func main() {
 	defer logger.Sync()
 
 	store := memory.New() // later: swap to a DB-backed store
-	api := httpapi.NewServer(logger, store, store, probe.NewHTTPChecker())
+
+	// Build MultiChecker with HTTP + DNS checks
+	checker := probe.NewMultiChecker(
+		probe.NewHTTPChecker(5*time.Second),
+		probe.NewDNSChecker(),
+	)
+
+	api := httpapi.NewServer(logger, store, store, checker)
 
 	logger.Info("api_listen", zap.String("addr", cfg.Addr))
 	if err := http.ListenAndServe(cfg.Addr, api.Router()); err != nil {
