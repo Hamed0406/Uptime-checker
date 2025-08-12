@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write            # needed to push to GHCR with GITHUB_TOKEN
+      packages: write
     outputs:
       sha_tag: ${{ steps.vars.outputs.SHA_TAG }}
     steps:
@@ -59,7 +59,7 @@ jobs:
     environment: production
     if: github.ref == 'refs/heads/main'
     steps:
-      - uses: actions/checkout@v4   # <-- required so files exist in this job
+      - uses: actions/checkout@v4
 
       - name: Show files for deploy (debug)
         run: |
@@ -68,18 +68,28 @@ jobs:
           echo "== migrations =="
           ls -la migrations || true
 
-      - name: Copy compose + migrations to server
+      - name: Prepare deploy bundle
+        run: |
+          set -e
+          mkdir -p bundle
+          if [ -f docker-compose.yml ]; then cp docker-compose.yml bundle/; fi
+          if [ -f docker-compose.prod.yml ]; then cp docker-compose.prod.yml bundle/; fi
+          if [ -d migrations ]; then cp -r migrations bundle/; fi
+          echo "Bundle contents:"
+          find bundle -maxdepth 2 -type f -print
+          # fail early if no compose file made it into the bundle
+          test -f bundle/docker-compose.yml -o -f bundle/docker-compose.prod.yml || { echo "No compose file found"; exit 1; }
+
+      - name: Copy bundle to server
         uses: appleboy/scp-action@v0.1.7
         with:
           host: ${{ secrets.PROD_HOST }}
           username: ${{ secrets.PROD_USER }}
           key: ${{ secrets.PROD_SSH_KEY }}
           port: ${{ secrets.PROD_PORT || 22 }}
-          source: |
-            ./docker-compose.yml
-            ./docker-compose.prod.yml
-            ./migrations/**/*.sql
+          source: bundle/**
           target: ${{ secrets.PROD_DIR }}
+          strip_components: 1   # drops the leading "bundle/" when extracting
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
@@ -94,9 +104,11 @@ jobs:
             export IMAGE_TAG='${{ needs.build-and-push.outputs.sha_tag }}'
             echo "Using IMAGE_TAG=$IMAGE_TAG"
 
-            # pick whichever compose file is present
+            # choose whichever compose file was uploaded
             COMPOSE_FILE=docker-compose.yml
             if [ -f docker-compose.prod.yml ]; then COMPOSE_FILE=docker-compose.prod.yml; fi
             echo "Using $COMPOSE_FILE"
 
-            docker compos
+            docker compose -f "$COMPOSE_FILE" pull
+            docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
+            docker image prune -f
