@@ -8,13 +8,11 @@ on:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-    # 👇 this grants the built-in GITHUB_TOKEN permission to push to GHCR
     permissions:
       contents: read
-      packages: write
+      packages: write            # needed to push to GHCR with GITHUB_TOKEN
     outputs:
       sha_tag: ${{ steps.vars.outputs.SHA_TAG }}
-      image_name: ${{ steps.meta.outputs.images }}
     steps:
       - uses: actions/checkout@v4
 
@@ -61,6 +59,15 @@ jobs:
     environment: production
     if: github.ref == 'refs/heads/main'
     steps:
+      - uses: actions/checkout@v4   # <-- required so files exist in this job
+
+      - name: Show files for deploy (debug)
+        run: |
+          pwd
+          ls -la
+          echo "== migrations =="
+          ls -la migrations || true
+
       - name: Copy compose + migrations to server
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -69,57 +76,27 @@ jobs:
           key: ${{ secrets.PROD_SSH_KEY }}
           port: ${{ secrets.PROD_PORT || 22 }}
           source: |
-            docker-compose.prod.yml
-            migrations/**
+            ./docker-compose.yml
+            ./docker-compose.prod.yml
+            ./migrations/**/*.sql
           target: ${{ secrets.PROD_DIR }}
 
-     deploy:
-  needs: build-and-push
-  runs-on: ubuntu-latest
-  environment: production
-  if: github.ref == 'refs/heads/main'
-  steps:
-    - uses: actions/checkout@v4   # 👈 REQUIRED so files exist in this job
+      - name: Deploy via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.PROD_HOST }}
+          username: ${{ secrets.PROD_USER }}
+          key: ${{ secrets.PROD_SSH_KEY }}
+          port: ${{ secrets.PROD_PORT || 22 }}
+          script: |
+            set -e
+            cd ${{ secrets.PROD_DIR }}
+            export IMAGE_TAG='${{ needs.build-and-push.outputs.sha_tag }}'
+            echo "Using IMAGE_TAG=$IMAGE_TAG"
 
-    - name: Show files for deploy (debug)
-      run: |
-        pwd
-        ls -la
-        echo "== migrations =="
-        ls -la migrations || true
+            # pick whichever compose file is present
+            COMPOSE_FILE=docker-compose.yml
+            if [ -f docker-compose.prod.yml ]; then COMPOSE_FILE=docker-compose.prod.yml; fi
+            echo "Using $COMPOSE_FILE"
 
-    - name: Copy compose + migrations to server
-      uses: appleboy/scp-action@v0.1.7
-      with:
-        host: ${{ secrets.PROD_HOST }}
-        username: ${{ secrets.PROD_USER }}
-        key: ${{ secrets.PROD_SSH_KEY }}
-        port: ${{ secrets.PROD_PORT || 22 }}
-        source: |
-          ./docker-compose.yml            # or keep ./docker-compose.prod.yml if that's your name
-          ./docker-compose.prod.yml
-          ./migrations/**/*.sql           # ensure at least one .sql exists, e.g. migrations/001_init.sql
-        target: ${{ secrets.PROD_DIR }}
-
-    - name: Deploy via SSH
-      uses: appleboy/ssh-action@v1.2.0
-      with:
-        host: ${{ secrets.PROD_HOST }}
-        username: ${{ secrets.PROD_USER }}
-        key: ${{ secrets.PROD_SSH_KEY }}
-        port: ${{ secrets.PROD_PORT || 22 }}
-        script: |
-          set -e
-          cd ${{ secrets.PROD_DIR }}
-          export IMAGE_TAG='${{ needs.build-and-push.outputs.sha_tag }}'
-          echo "Using IMAGE_TAG=$IMAGE_TAG"
-
-          # pick whichever compose file you uploaded
-          COMPOSE_FILE=docker-compose.yml
-          if [ -f docker-compose.prod.yml ]; then COMPOSE_FILE=docker-compose.prod.yml; fi
-          echo "Using $COMPOSE_FILE"
-
-          docker compose -f "$COMPOSE_FILE" pull
-          docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
-          docker image prune -f
-
+            docker compos
