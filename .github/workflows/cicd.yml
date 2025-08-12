@@ -36,6 +36,9 @@ jobs:
           images: ghcr.io/${{ env.OWNER_LC }}/uptimechecker
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
+            # 👇 push the exact full commit SHA so deploy can pull it
+            type=raw,value=${{ github.sha }}
+            # keep the conventional sha-* tag too (nice for browsing)
             type=sha
 
       - name: Build and push
