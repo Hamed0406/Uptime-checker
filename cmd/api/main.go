@@ -1,3 +1,4 @@
+// cmd/api/main.go
 package main
 
 import (
@@ -22,11 +23,17 @@ func main() {
 	}
 	defer logger.Sync()
 
-	store := memory.New() // later: swap to a DB-backed store
+	store := memory.New()
 
-	// Build MultiChecker with HTTP + DNS checks
+	// ⬇️ Wrap HTTPChecker with RetryChecker (2 attempts, 300ms backoff)
+	httpWithRetry := &probe.RetryChecker{
+		Inner:    probe.NewHTTPChecker(5 * time.Second),
+		Attempts: 2,
+		Backoff:  300 * time.Millisecond,
+	}
+
 	checker := probe.NewMultiChecker(
-		probe.NewHTTPChecker(5*time.Second),
+		httpWithRetry,
 		probe.NewDNSChecker(),
 	)
 
