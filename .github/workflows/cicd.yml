@@ -2,36 +2,40 @@ name: CI/CD
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
-
-env:
-  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/uptimechecker
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # 👇 this grants the built-in GITHUB_TOKEN permission to push to GHCR
     permissions:
       contents: read
       packages: write
+    outputs:
+      sha_tag: ${{ steps.vars.outputs.SHA_TAG }}
+      image_name: ${{ steps.meta.outputs.images }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: Lowercase owner (for GHCR path)
+        run: echo "OWNER_LC=${GITHUB_REPOSITORY_OWNER,,}" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
+      - name: Log in to GHCR (using GITHUB_TOKEN)
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GHCR_TOKEN }}
+          password: ${{ github.token }}
 
       - name: Extract metadata (tags, labels)
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.IMAGE_NAME }}
+          images: ghcr.io/${{ env.OWNER_LC }}/uptimechecker
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
             type=sha
@@ -49,7 +53,7 @@ jobs:
 
       - name: Expose image tag for deploy
         id: vars
-        run: echo "SHA_TAG=$(echo $GITHUB_SHA)" >> $GITHUB_OUTPUT
+        run: echo "SHA_TAG=${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
   deploy:
     needs: build-and-push
@@ -79,10 +83,11 @@ jobs:
           script: |
             set -e
             cd ${{ secrets.PROD_DIR }}
-            export IMAGE_TAG=${{ needs.build-and-push.outputs.SHA_TAG }}
+            export IMAGE_TAG='${{ needs.build-and-push.outputs.sha_tag }}'
             echo "Using IMAGE_TAG=$IMAGE_TAG"
-            # If your GHCR repo is private, uncomment and set GHCR creds (store in server or pass via secrets)
-            # echo ${{ secrets.GHCR_TOKEN }} | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+            # If your GHCR package is private and your VM isn't logged in to GHCR,
+            # uncomment the next line and add a read:packages PAT as GHCR_TOKEN
+            # echo '${{ github.token }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
             docker compose -f docker-compose.prod.yml pull
             docker compose -f docker-compose.prod.yml up -d --remove-orphans
             docker image prune -f
