@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   db:
     image: postgres:16
@@ -20,12 +18,10 @@ services:
       - "5432:5432"
 
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
+    image: ghcr.io/hamed0406/uptimechecker:${IMAGE_TAG}
     restart: unless-stopped
     environment:
-      API_ADDR: ":8080"  # bind to all interfaces inside container
+      API_ADDR: ":8080"
       LOG_DIR: "/var/log/uptime"
       DATABASE_URL: "postgres://app:app@db:5432/app?sslmode=disable"
       RETRY_ATTEMPTS: "2"
@@ -37,15 +33,6 @@ services:
       - "8080:8080"
     volumes:
       - apilogs:/var/log/uptime
-
-  # (later) web:
-  #   build:
-  #     context: ./web
-  #     dockerfile: Dockerfile.web
-  #   ports:
-  #     - "3000:80"
-  #   depends_on:
-  #     - api
 
 volumes:
   pgdata:
