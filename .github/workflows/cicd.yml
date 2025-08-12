@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+      packages: write          # allow GITHUB_TOKEN to push to GHCR
     outputs:
       sha_tag: ${{ steps.vars.outputs.SHA_TAG }}
     steps:
@@ -77,7 +77,6 @@ jobs:
           if [ -d migrations ]; then cp -r migrations bundle/; fi
           echo "Bundle contents:"
           find bundle -maxdepth 2 -type f -print
-          # fail early if no compose file made it into the bundle
           test -f bundle/docker-compose.yml -o -f bundle/docker-compose.prod.yml || { echo "No compose file found"; exit 1; }
 
       - name: Copy bundle to server
@@ -89,7 +88,7 @@ jobs:
           port: ${{ secrets.PROD_PORT || 22 }}
           source: bundle/**
           target: ${{ secrets.PROD_DIR }}
-          strip_components: 1   # drops the leading "bundle/" when extracting
+          strip_components: 1
 
       - name: Deploy via SSH
         uses: appleboy/ssh-action@v1.2.0
@@ -104,7 +103,10 @@ jobs:
             export IMAGE_TAG='${{ needs.build-and-push.outputs.sha_tag }}'
             echo "Using IMAGE_TAG=$IMAGE_TAG"
 
-            # choose whichever compose file was uploaded
+            # Login to GHCR so the VM can pull private images
+            echo '${{ github.token }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
+
+            # Pick whichever compose file is present
             COMPOSE_FILE=docker-compose.yml
             if [ -f docker-compose.prod.yml ]; then COMPOSE_FILE=docker-compose.prod.yml; fi
             echo "Using $COMPOSE_FILE"
