@@ -21,7 +21,7 @@ services:
     #   - "5432:5432"
 
   api:
-    image: ghcr.io/hamed0406/uptimechecker:${IMAGE_TAG}
+    image: ghcr.io/hamed0406/uptimechecker:${IMAGE_TAG:-latest}
     restart: unless-stopped
     env_file:
       - .env
