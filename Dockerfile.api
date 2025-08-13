@@ -1,16 +1,27 @@
-# build stage
+# ---------- build stage ----------
 FROM golang:1.23 AS build
 WORKDIR /app
 ENV GOTOOLCHAIN=auto
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
+# build static linux binary
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/api ./cmd/api
 
-# run stage (distroless)
-FROM gcr.io/distroless/base-debian12
+# ---------- run stage (Alpine) ----------
+FROM alpine:3.20
+
+# helper to drop privileges
+RUN apk add --no-cache su-exec
+
+# create non-root user and log dir
+RUN adduser -D -u 1000 app && mkdir -p /var/log/uptime
 WORKDIR /app
+
+# copy binary + entrypoint
 COPY --from=build /out/api /app/api
+COPY scripts/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
 EXPOSE 8080
-USER nonroot:nonroot
-ENTRYPOINT ["/app/api"]
+ENTRYPOINT ["/entrypoint.sh"]
