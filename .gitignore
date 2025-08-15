@@ -37,3 +37,9 @@ Thumbs.db
 # IDE configs
 .idea/
 .vscode/
+
+# Frontend dependencies
+
+frontend/node_modules/
+frontend/dist/
+frontend/build/
