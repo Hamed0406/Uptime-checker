@@ -48,7 +48,7 @@ services:
     build:
       context: .
       dockerfile: frontend/Dockerfile.frontend
-    image: uptimechecker-frontend:local
+    # image: uptimechecker-frontend:local
     restart: unless-stopped
     depends_on:
       - api
