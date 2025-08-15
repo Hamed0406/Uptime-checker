@@ -1,0 +1,6 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    image: ghcr.io/hamed0406/uptimechecker:local
