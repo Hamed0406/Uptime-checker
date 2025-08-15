@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write          # allow GITHUB_TOKEN to push to GHCR
+      packages: write            # allow GITHUB_TOKEN to push to GHCR
     outputs:
       sha_tag: ${{ steps.vars.outputs.SHA_TAG }}
     steps:
@@ -36,12 +36,10 @@ jobs:
           images: ghcr.io/${{ env.OWNER_LC }}/uptimechecker
           tags: |
             type=raw,value=latest,enable={{is_default_branch}}
-            # 👇 push the exact full commit SHA so deploy can pull it
             type=raw,value=${{ github.sha }}
-            # keep the conventional sha-* tag too (nice for browsing)
             type=sha
 
-      - name: Build and push
+      - name: Build and push API image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -68,19 +66,21 @@ jobs:
         run: |
           pwd
           ls -la
-          echo "== migrations =="
-          ls -la migrations || true
+          echo "== migrations ==" && ls -la migrations || true
+          echo "== frontend ==" && ls -la frontend || true
+          test -f docker-compose.prod.yml || { echo "docker-compose.prod.yml missing"; exit 1; }
 
+      # --- package only what's needed on the server ---
       - name: Prepare deploy bundle
         run: |
           set -e
+          rm -rf bundle
           mkdir -p bundle
-          if [ -f docker-compose.yml ]; then cp docker-compose.yml bundle/; fi
-          if [ -f docker-compose.prod.yml ]; then cp docker-compose.prod.yml bundle/; fi
+          cp docker-compose.prod.yml bundle/
           if [ -d migrations ]; then cp -r migrations bundle/; fi
+          if [ -d frontend ]; then cp -r frontend bundle/; fi
           echo "Bundle contents:"
-          find bundle -maxdepth 2 -type f -print
-          test -f bundle/docker-compose.yml -o -f bundle/docker-compose.prod.yml || { echo "No compose file found"; exit 1; }
+          find bundle -maxdepth 3 -type f -print
 
       - name: Copy bundle to server
         uses: appleboy/scp-action@v0.1.7
@@ -103,17 +103,19 @@ jobs:
           script: |
             set -e
             cd ${{ secrets.PROD_DIR }}
+
+            # Select the image tag produced in build job (full commit SHA)
             export IMAGE_TAG='${{ needs.build-and-push.outputs.sha_tag }}'
             echo "Using IMAGE_TAG=$IMAGE_TAG"
 
-            # Login to GHCR so the VM can pull private images
+            # Login to GHCR (required if your repo/org packages are private)
             echo '${{ github.token }}' | docker login ghcr.io -u '${{ github.actor }}' --password-stdin
 
-            # Pick whichever compose file is present
-            COMPOSE_FILE=docker-compose.yml
-            if [ -f docker-compose.prod.yml ]; then COMPOSE_FILE=docker-compose.prod.yml; fi
-            echo "Using $COMPOSE_FILE"
+            # Pull only registry-backed services (api, db). Frontend will be built locally.
+            docker compose -f docker-compose.prod.yml pull api db
 
-            docker compose -f "$COMPOSE_FILE" pull
-            docker compose -f "$COMPOSE_FILE" up -d --remove-orphans
+            # Build the frontend image locally from ./frontend and start all services
+            docker compose -f docker-compose.prod.yml up -d --build --remove-orphans
+
+            # Optional cleanup
             docker image prune -f
