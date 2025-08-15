@@ -1,14 +1,13 @@
 package main
 
 import (
-	"context"
 	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"go.uber.org/zap"
 
-	"github.com/hamed0406/uptimechecker/internal/config"
 	"github.com/hamed0406/uptimechecker/internal/httpapi"
 	"github.com/hamed0406/uptimechecker/internal/logging"
 	"github.com/hamed0406/uptimechecker/internal/probe"
@@ -18,51 +17,40 @@ import (
 )
 
 func main() {
-	cfg := config.FromEnv()
+	addr := os.Getenv("API_ADDR")
+	if addr == "" {
+		addr = ":8080"
+	}
+	logDir := os.Getenv("LOG_DIR")
+	if logDir == "" {
+		logDir = "logs"
+	}
 
-	logger, err := logging.NewLogger(cfg.LogDir)
+	logger, err := logging.NewLogger(logDir)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer logger.Sync()
 
-	// Choose store (Postgres if DATABASE_URL set; otherwise in-memory)
-	var (
-		targetStore repo.TargetStore
-		resultStore repo.ResultStore
-	)
+	var ts repo.TargetStore
+	var rs repo.ResultStore
 
-	if cfg.DatabaseURL != "" {
-		pg, err := postgres.New(context.Background(), cfg.DatabaseURL)
+	if dbURL := os.Getenv("DATABASE_URL"); dbURL != "" {
+		store, err := postgres.NewStore(dbURL)
 		if err != nil {
 			log.Fatalf("postgres connect failed: %v", err)
 		}
-		defer pg.Close()
-		targetStore = pg
-		resultStore = pg
-		logger.Info("store_selected", zap.String("type", "postgres"))
+		ts, rs = store, store
 	} else {
-		mem := memory.New()
-		targetStore = mem
-		resultStore = mem
-		logger.Info("store_selected", zap.String("type", "memory"))
+		store := memory.New()
+		ts, rs = store, store
 	}
 
-	// Build checks: HTTP with retry + DNS
-	httpWithRetry := &probe.RetryChecker{
-		Inner:    probe.NewHTTPChecker(5 * time.Second),
-		Attempts: cfg.RetryAttempts,
-		Backoff:  cfg.RetryBackoff,
-	}
-	checker := probe.NewMultiChecker(
-		httpWithRetry,
-		probe.NewDNSChecker(),
-	)
+	checker := probe.NewHTTPChecker(10 * time.Second)
+	api := httpapi.NewServer(logger, ts, rs, checker)
 
-	api := httpapi.NewServer(logger, targetStore, resultStore, checker)
-
-	logger.Info("api_listen", zap.String("addr", cfg.Addr))
-	if err := http.ListenAndServe(cfg.Addr, api.Router()); err != nil {
+	logger.Info("api_listen", zap.String("addr", addr))
+	if err := http.ListenAndServe(addr, api.Router()); err != nil {
 		log.Fatal(err)
 	}
 }

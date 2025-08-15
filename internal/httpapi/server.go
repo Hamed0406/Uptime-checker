@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -20,16 +19,11 @@ type Server struct {
 	Logger  *zap.Logger
 	Targets repo.TargetStore
 	Results repo.ResultStore
-	Checker *probe.MultiChecker
+	Checker probe.Checker
 }
 
-func NewServer(l *zap.Logger, ts repo.TargetStore, rs repo.ResultStore, c *probe.MultiChecker) *Server {
-	return &Server{
-		Logger:  l,
-		Targets: ts,
-		Results: rs,
-		Checker: c,
-	}
+func NewServer(l *zap.Logger, ts repo.TargetStore, rs repo.ResultStore, c probe.Checker) *Server {
+	return &Server{Logger: l, Targets: ts, Results: rs, Checker: c}
 }
 
 func (s *Server) Router() http.Handler {
@@ -37,12 +31,14 @@ func (s *Server) Router() http.Handler {
 	r.Use(cors.AllowAll().Handler)
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok"))
 	})
 
 	r.Get("/api/targets", s.handleListTargets)
 	r.Post("/api/targets", s.handleAddTarget)
+	r.Get("/api/results/latest", s.handleLatest)
 
 	return r
 }
@@ -53,7 +49,7 @@ type addPayload struct {
 
 func (s *Server) handleAddTarget(w http.ResponseWriter, r *http.Request) {
 	var p addPayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || strings.TrimSpace(p.URL) == "" {
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.URL == "" {
 		http.Error(w, "bad payload", http.StatusBadRequest)
 		return
 	}
@@ -64,48 +60,31 @@ func (s *Server) handleAddTarget(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Run all registered checks (HTTP, DNS, ...).
-	results := s.Checker.Run(context.Background(), p.URL)
-
-	// Decide overall UP/DOWN: require HTTP success.
-	up := false
-	var httpLatency float64
-	for _, res := range results {
-		if res.Name == "HTTP" {
-			up = res.Success
-			httpLatency = res.LatencyMS
-			break
-		}
-	}
-
-	// Combine messages for a human-readable reason.
-	var parts []string
-	for _, res := range results {
-		parts = append(parts, res.Name+"="+res.Message)
-	}
-	reason := strings.Join(parts, " ")
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	out := s.Checker.Check(ctx, p.URL)
 
 	cr := &domain.CheckResult{
-		TargetID:  t.ID,
-		Up:        up,
-		LatencyMS: httpLatency, // HTTP latency if available
-		Reason:    reason,
-		CheckedAt: time.Now().UTC(),
+		TargetID:   t.ID,
+		Up:         out.Success,
+		HTTPStatus: 0, // not provided by current checker
+		LatencyMS:  out.LatencyMS,
+		Reason:     out.Message,
+		CheckedAt:  time.Now().UTC(),
 	}
 	_ = s.Results.Append(r.Context(), cr)
 
 	s.Logger.Info("added_target",
 		zap.String("url", p.URL),
-		zap.Bool("up", up),
-		zap.Float64("latency_ms", httpLatency),
-		zap.String("reason", reason),
+		zap.Bool("up", out.Success),
+		zap.Float64("latency_ms", out.LatencyMS),
+		zap.String("reason", out.Message),
 	)
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"target":  t,
-		"results": results, // detailed per-check results
-		"summary": cr,      // overall interpretation
+		"summary": cr,
 	})
 }
 
@@ -117,4 +96,14 @@ func (s *Server) handleListTargets(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(ts)
+}
+
+func (s *Server) handleLatest(w http.ResponseWriter, r *http.Request) {
+	rows, err := s.Results.Latest(r.Context())
+	if err != nil {
+		http.Error(w, "latest error", http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(rows)
 }

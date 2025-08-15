@@ -3,53 +3,68 @@ package config
 import (
 	"os"
 	"strconv"
-	"time"
+	"strings"
 )
 
 type Config struct {
-	Addr          string        // API bind address, e.g., "127.0.0.1:8080" (Windows) or ":8080" (Docker)
-	LogDir        string        // logs directory
-	DatabaseURL   string        // e.g., postgres://user:pass@host:5432/db?sslmode=disable
-	RetryAttempts int           // how many times to retry HTTP check
-	RetryBackoff  time.Duration // backoff between retries
+	Addr           string
+	LogDir         string
+	DatabaseURL    string
+	RetryAttempts  int
+	RetryBackoffMS int
+
+	// New
+	PublicAPIKeys  []string // read-only keys (SPA)
+	AdminAPIKeys   []string // write/admin keys
+	AllowedOrigins []string // CORS allowlist
+}
+
+func splitCSV(s string) []string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if v := strings.TrimSpace(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 func FromEnv() Config {
-	// Bind address (Windows-friendly default)
 	addr := os.Getenv("API_ADDR")
 	if addr == "" {
-		addr = "127.0.0.1:8080"
+		addr = ":8080"
 	}
-
-	// Logs
 	logDir := os.Getenv("LOG_DIR")
 	if logDir == "" {
 		logDir = "logs"
 	}
 
-	// Database (empty means use in-memory store)
-	db := os.Getenv("DATABASE_URL")
-
-	// Retry tuning
 	retryAttempts := 2
-	if v := os.Getenv("RETRY_ATTEMPTS"); v != "" {
-		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+	if v := strings.TrimSpace(os.Getenv("RETRY_ATTEMPTS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			retryAttempts = n
 		}
 	}
-
-	retryBackoff := 300 * time.Millisecond
-	if v := os.Getenv("RETRY_BACKOFF_MS"); v != "" {
-		if ms, err := strconv.Atoi(v); err == nil && ms >= 0 {
-			retryBackoff = time.Duration(ms) * time.Millisecond
+	retryBackoff := 300
+	if v := strings.TrimSpace(os.Getenv("RETRY_BACKOFF_MS")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			retryBackoff = n
 		}
 	}
 
 	return Config{
-		Addr:          addr,
-		LogDir:        logDir,
-		DatabaseURL:   db,
-		RetryAttempts: retryAttempts,
-		RetryBackoff:  retryBackoff,
+		Addr:           addr,
+		LogDir:         logDir,
+		DatabaseURL:    os.Getenv("DATABASE_URL"),
+		RetryAttempts:  retryAttempts,
+		RetryBackoffMS: retryBackoff,
+		PublicAPIKeys:  splitCSV(os.Getenv("API_KEYS_PUBLIC")),
+		AdminAPIKeys:   splitCSV(os.Getenv("API_KEYS_ADMIN")),
+		AllowedOrigins: splitCSV(os.Getenv("CORS_ALLOWED_ORIGINS")),
 	}
 }

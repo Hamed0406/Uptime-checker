@@ -9,74 +9,86 @@ import (
 	"github.com/hamed0406/uptimechecker/internal/repo"
 )
 
-type MemoryStore struct {
+type Store struct {
 	mu      sync.RWMutex
-	targets map[domain.TargetID]domain.Target
-	byURL   map[string]domain.TargetID
-	results map[domain.TargetID]domain.CheckResult
+	targets map[domain.TargetID]*domain.Target
+	results []*domain.CheckResult
 }
 
-func New() *MemoryStore {
-	return &MemoryStore{
-		targets: make(map[domain.TargetID]domain.Target),
-		byURL:   make(map[string]domain.TargetID),
-		results: make(map[domain.TargetID]domain.CheckResult),
+func New() *Store {
+	return &Store{
+		targets: make(map[domain.TargetID]*domain.Target),
+		results: make([]*domain.CheckResult, 0, 128),
 	}
 }
 
-func (s *MemoryStore) Add(ctx context.Context, t *domain.Target) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, ok := s.byURL[t.URL]; ok {
-		return nil // idempotent
-	}
+func (m *Store) Add(ctx context.Context, t *domain.Target) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if t.ID == "" {
 		t.ID = domain.TargetID(time.Now().UTC().Format("20060102T150405.000000000"))
 	}
 	if t.CreatedAt.IsZero() {
 		t.CreatedAt = time.Now().UTC()
 	}
-	s.targets[t.ID] = *t
-	s.byURL[t.URL] = t.ID
+	m.targets[t.ID] = t
 	return nil
 }
 
-func (s *MemoryStore) List(ctx context.Context) ([]domain.Target, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	out := make([]domain.Target, 0, len(s.targets))
-	for _, t := range s.targets {
+func (m *Store) List(ctx context.Context) ([]*domain.Target, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]*domain.Target, 0, len(m.targets))
+	for _, t := range m.targets {
 		out = append(out, t)
 	}
 	return out, nil
 }
 
-func (s *MemoryStore) GetByURL(ctx context.Context, url string) (*domain.Target, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if id, ok := s.byURL[url]; ok {
-		t := s.targets[id]
-		return &t, nil
-	}
-	return nil, nil
-}
-
-func (s *MemoryStore) Append(ctx context.Context, r *domain.CheckResult) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.results[r.TargetID] = *r
+func (m *Store) Append(ctx context.Context, r *domain.CheckResult) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.results = append(m.results, r)
 	return nil
 }
 
-func (s *MemoryStore) LastByTarget(ctx context.Context, id domain.TargetID) (*domain.CheckResult, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	if r, ok := s.results[id]; ok {
-		out := r
-		return &out, nil
-	}
-	return nil, nil
-}
+func (m *Store) Latest(ctx context.Context) ([]repo.LatestRow, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-var _ repo.TargetStore = (*MemoryStore)(nil)
-var _ repo.ResultStore = (*MemoryStore)(nil)
+	latest := make(map[domain.TargetID]*domain.CheckResult)
+	for _, r := range m.results {
+		cur := latest[r.TargetID]
+		if cur == nil || r.CheckedAt.After(cur.CheckedAt) {
+			latest[r.TargetID] = r
+		}
+	}
+
+	out := make([]repo.LatestRow, 0, len(latest))
+	for tid, r := range latest {
+		var hs *int
+		var lat *float64
+		if r.HTTPStatus != 0 {
+			v := r.HTTPStatus
+			hs = &v
+		}
+		if r.LatencyMS != 0 {
+			v := r.LatencyMS
+			lat = &v
+		}
+		url := ""
+		if t := m.targets[tid]; t != nil {
+			url = t.URL
+		}
+		out = append(out, repo.LatestRow{
+			TargetID:   string(tid),
+			URL:        url,
+			Up:         r.Up,
+			HTTPStatus: hs,
+			LatencyMS:  lat,
+			Reason:     r.Reason,
+			CheckedAt:  r.CheckedAt,
+		})
+	}
+	return out, nil
+}
