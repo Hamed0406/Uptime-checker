@@ -1,4 +1,4 @@
-version: "3.9"
+# (remove "version:" line to silence the warning)
 
 services:
   db:
@@ -18,7 +18,6 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
-    # no public port in prod
 
   api:
     image: ghcr.io/hamed0406/uptimechecker:${IMAGE_TAG:-latest}
@@ -42,19 +41,15 @@ services:
       retries: 3
       start_period: 10s
 
-  # --- Frontend (nginx serving SPA; proxies /api -> api:8080) ---
   frontend:
-    # Option A: build on the server (simple, no registry needed)
     build:
-      context: ./frontend 
-      dockerfile: frontend/Dockerfile.frontend
-    # image: uptimechecker-frontend:local
+      context: ./frontend                # <— POINTS to the frontend folder
+      dockerfile: Dockerfile.frontend    # <— RELATIVE to context (no 'frontend/' prefix)
     restart: unless-stopped
     depends_on:
       - api
     ports:
       - "80:80"
-    # no env needed; nginx.conf already proxies /api -> api:8080
 
 volumes:
   pgdata:
