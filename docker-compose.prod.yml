@@ -46,7 +46,7 @@ services:
   frontend:
     # Option A: build on the server (simple, no registry needed)
     build:
-      context: .
+      context: ./frontend 
       dockerfile: frontend/Dockerfile.frontend
     # image: uptimechecker-frontend:local
     restart: unless-stopped
