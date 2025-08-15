@@ -1,27 +1,31 @@
 # ---------- build stage ----------
 FROM golang:1.23 AS build
 WORKDIR /app
-ENV GOTOOLCHAIN=auto
 COPY go.mod go.sum ./
 RUN go mod download
+
 COPY . .
-# build static linux binary
+# Build the API binary
 RUN CGO_ENABLED=0 GOOS=linux go build -o /out/api ./cmd/api
 
-# ---------- run stage (Alpine) ----------
+# ---------- runtime stage ----------
 FROM alpine:3.20
-
-# helper to drop privileges
-RUN apk add --no-cache su-exec
-
-# create non-root user and log dir
-RUN adduser -D -u 1000 app && mkdir -p /var/log/uptime
+# su-exec to drop privileges, plus certs & tz
+RUN apk add --no-cache ca-certificates tzdata su-exec \
+  && addgroup -S app && adduser -S -G app -u 1000 app
 WORKDIR /app
 
-# copy binary + entrypoint
+# Copy binary
 COPY --from=build /out/api /app/api
-COPY scripts/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
 
+# Copy entrypoint to a well-known path
+COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
+
+# Ensure it's executable and convert CRLF->LF (important on Windows)
+RUN chmod +x /usr/local/bin/entrypoint.sh \
+  && sed -i 's/\r$//' /usr/local/bin/entrypoint.sh
+
+ENV API_ADDR=:8080
 EXPOSE 8080
-ENTRYPOINT ["/entrypoint.sh"]
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

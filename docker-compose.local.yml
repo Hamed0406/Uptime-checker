@@ -1,6 +1,65 @@
+version: "3.9"
+
 services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    # Dev only: expose Postgres to host if you want to connect with a GUI
+    ports:
+      - "5432:5432"
+
   api:
+    # Build locally for dev; no GHCR needed
     build:
       context: .
       dockerfile: Dockerfile.api
     image: ghcr.io/hamed0406/uptimechecker:local
+    restart: unless-stopped
+    env_file:
+      - .env
+    # Keep DATABASE_URL explicit so it works even if env_var precedence changes
+    environment:
+      DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable"
+      LOG_DIR: "${LOG_DIR:-/var/log/uptime}"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8080:8080"
+    volumes:
+      # Persist API logs in a named volume
+      - apilogs:/var/log/uptime
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/healthz >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile.frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - api
+
+
+volumes:
+  pgdata:
+  apilogs:

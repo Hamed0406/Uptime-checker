@@ -1,3 +1,5 @@
+version: "3.9"
+
 services:
   db:
     image: postgres:16
@@ -11,15 +13,12 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./migrations:/docker-entrypoint-initdb.d:ro
-      - apilogs:/app/logs
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 3s
       retries: 10
-    # ❌ remove public port in prod
-    # ports:
-    #   - "5432:5432"
+    # no public port in prod
 
   api:
     image: ghcr.io/hamed0406/uptimechecker:${IMAGE_TAG:-latest}
@@ -28,6 +27,7 @@ services:
       - .env
     environment:
       DATABASE_URL: "postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}?sslmode=disable"
+      LOG_DIR: "${LOG_DIR:-/var/log/uptime}"
     depends_on:
       db:
         condition: service_healthy
@@ -41,6 +41,20 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # --- Frontend (nginx serving SPA; proxies /api -> api:8080) ---
+  frontend:
+    # Option A: build on the server (simple, no registry needed)
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile.frontend
+    image: uptimechecker-frontend:local
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+    # no env needed; nginx.conf already proxies /api -> api:8080
 
 volumes:
   pgdata:
