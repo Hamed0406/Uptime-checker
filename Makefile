@@ -6,17 +6,16 @@ GO_IMAGE ?= golang:1.23.5
 COMPOSE  ?= docker compose
 
 # --- files / paths ---
-ENV_FILE ?= .env
-BIN      ?= bin/api
-
-# host port: Docker publishes 8080:8080; host uses 8081 by default
-HOST_PORT ?= 8081
+ENV_FILE    ?= .env
+HOST_ENV    ?= .env.host    # optional: per-host overrides
+BIN         ?= bin/api
 
 .DEFAULT_GOAL := help
 
 .PHONY: help tidy fmt vet test race cover cover-html \
-        build-host run-host run-host-bg logs-host stop-host ps-port \
-        build-docker up restart down logs ps test-docker smoke sh-build
+        build-host run-host logs-host stop-host \
+        host host-up host-down host-logs \
+        build-docker up restart down down-images nuke logs ps test-docker smoke sh-build reset-db
 
 # ---------------------------------
 # Help
@@ -24,33 +23,50 @@ HOST_PORT ?= 8081
 help:
 	@echo "Targets:"
 	@echo "  tidy / fmt / vet / test / race / cover / cover-html"
-	@echo "  build-host     - build API on host into $(BIN)"
-	@echo "  run-host       - run API on host (default :$(HOST_PORT); override: PORT=xxxx)"
-	@echo "  run-host-bg    - build + run host binary in background (.run/api.pid)"
-	@echo "  logs-host      - tail ./logs/uptime.log"
-	@echo "  stop-host      - stop by PID file or kill listener on PORT (default :$(HOST_PORT))"
-	@echo "  ps-port        - show process listening on PORT (default :$(HOST_PORT))"
-	@echo "  build-docker   - build Docker image"
-	@echo "  up             - start stack (docker) -> publishes 8080:8080"
-	@echo "  restart        - rebuild & force-recreate"
-	@echo "  down           - stop & remove containers, images, volumes (project)"
-	@echo "  logs           - follow docker logs for api service"
-	@echo "  ps             - show compose services"
-	@echo "  test-docker    - run tests in a Go container"
-	@echo "  smoke          - quick health + targets check on localhost:8080"
-	@echo "  sh-build       - open a shell in a Go builder container"
+	@echo "  build-host    - build the API on host into $(BIN)"
+	@echo "  run-host      - run API on host (defaults :8081; override with PORT=xxxx)"
+	@echo "                 Uses HOST_LOG_DIR (default ./logs) -- ignores LOG_DIR from .env"
+	@echo "  logs-host     - tail host logs (HOST_LOG_DIR/uptime.log)"
+	@echo "  stop-host     - stop host-run API (uses pkill and socket kill on :\$$PORT)"
+	@echo "  host          - helper: shows host targets"
+	@echo "  host-up       - alias for run-host"
+	@echo "  host-down     - alias for stop-host"
+	@echo "  host-logs     - alias for logs-host"
+	@echo "  build-docker  - build Docker image"
+	@echo "  up            - start stack (docker) -> publishes 8080:8080 and 5432:5432"
+	@echo "  restart       - rebuild & force-recreate"
+	@echo "  down          - stop & remove containers + volumes (keeps base images)"
+	@echo "  down-images   - like 'down' but also remove compose-built images"
+	@echo "  nuke          - aggressive clean: stop rm any postgres:16 users, rmi it, down-images"
+	@echo "  logs          - follow docker logs for api service"
+	@echo "  ps            - show compose services"
+	@echo "  test-docker   - run tests in a Go container"
+	@echo "  smoke         - tiny health/targets smoke test against localhost:8080"
+	@echo "  reset-db      - truncate targets/results in docker Postgres (dev-only)"
+	@echo "  sh-build      - shell in a Go builder container (mounted repo)"
 
 # ---------------------------------
 # Go housekeeping
 # ---------------------------------
-tidy: ; $(GO) mod tidy
-fmt:  ; $(GO) fmt ./...
-vet:  ; $(GO) vet ./...
-test: ; $(GO) test ./...
-race: ; $(GO) test -race ./...
+tidy:
+	$(GO) mod tidy
+
+fmt:
+	$(GO) fmt ./...
+
+vet:
+	$(GO) vet ./...
+
+test:
+	$(GO) test ./...
+
+race:
+	$(GO) test -race ./...
+
 cover:
 	$(GO) test -coverprofile=cover.out ./...
 	$(GO) tool cover -func=cover.out
+
 cover-html: cover
 	$(GO) tool cover -html=cover.out -o cover.html
 	@echo "Open ./cover.html"
@@ -62,62 +78,70 @@ build-host:
 	mkdir -p $(dir $(BIN))
 	$(GO) build -o $(BIN) ./cmd/api
 
-# Foreground (Ctrl+C to stop). Forces ADDR to :${PORT:-HOST_PORT}
+# Runs on :8081 by default (does NOT use ADDR/LOG_DIR from .env to avoid clashing with Docker).
+# Override with: PORT=9090 HOST_LOG_DIR=./logs make host-up
 run-host:
-	# Load .env if present, force host ADDR to chosen port, default :$(HOST_PORT)
-	set -a; [ -f $(ENV_FILE) ] && . $(ENV_FILE); set +a; \
-	export ADDR=":$${PORT:-$(HOST_PORT)}"; \
-	export LOG_DIR=$${LOG_DIR:-./logs}; mkdir -p "$$LOG_DIR"; \
+	# Load .env for keys, then optional .env.host for host-specific overrides.
+	set -a; [ -f $(ENV_FILE) ] && . $(ENV_FILE); [ -f $(HOST_ENV) ] && . $(HOST_ENV); set +a; \
+	export ADDR=":$${PORT:-8081}"; \
+	export LOG_DIR=$${HOST_LOG_DIR:-./logs}; mkdir -p "$$LOG_DIR"; \
 	echo "Host run on $$ADDR (logs => $$LOG_DIR/uptime.log)"; \
 	$(GO) run ./cmd/api
 
-# Background via compiled binary with PID file
-run-host-bg: build-host
-	mkdir -p .run
-	set -a; [ -f $(ENV_FILE) ] && . $(ENV_FILE); set +a; \
-	export ADDR=":$${PORT:-$(HOST_PORT)}"; \
-	export LOG_DIR=$${LOG_DIR:-./logs}; mkdir -p "$$LOG_DIR"; \
-	echo "Starting $(BIN) on $$ADDR (logs => $$LOG_DIR/uptime.log)"; \
-	./$(BIN) & echo $$! > .run/api.pid ; disown || true
-
 logs-host:
-	tail -f ./logs/uptime.log
+	@dir=$${HOST_LOG_DIR:-./logs}; mkdir -p "$$dir"; touch "$$dir/uptime.log"; \
+	echo "Tailing $$dir/uptime.log"; tail -f "$$dir/uptime.log"
 
-# Stop by PID file if present; otherwise kill listener on chosen port.
+# stop by process name and also kill anything listening on :PORT (default 8081)
 stop-host:
-	@port=$${PORT:-$(HOST_PORT)}; \
-	if [ -f .run/api.pid ]; then \
-	  pid=$$(cat .run/api.pid); echo "Stopping PID $$pid from .run/api.pid"; \
-	  kill $$pid 2>/dev/null || true; sleep 1; kill -9 $$pid 2>/dev/null || true; \
-	  rm -f .run/api.pid; \
-	fi; \
-	pids=$$(lsof -ti TCP:$$port -sTCP:LISTEN 2>/dev/null || true); \
-	if [ -z "$$pids" ]; then \
-	  pids=$$(ss -ltnp 2>/dev/null | awk -v p=":$$port" '$$4 ~ p && /LISTEN/ {print $$NF}' | \
-	    sed 's/.*pid=//;s/,.*//' | sort -u); \
-	fi; \
-	if [ -n "$$pids" ]; then \
-	  echo "Killing listeners on :$$port -> $$pids"; \
-	  kill $$pids 2>/dev/null || true; sleep 1; kill -9 $$pids 2>/dev/null || true; \
-	else echo "No process listening on :$$port"; fi
+	-@pkill -f "cmd/api" || true
+	@PORT=$${PORT:-8081}; \
+	PIDS=$$(ss -ltnp 2>/dev/null | awk '/:'"$$PORT"' /{print $$6}' | sed -n 's/.*pid=\([0-9]\+\).*/\1/p' | sort -u); \
+	if [ -n "$$PIDS" ]; then echo "Killing listeners on :$$PORT -> $$PIDS"; kill -9 $$PIDS || true; else echo "No listeners on :$$PORT"; fi
 
-ps-port:
-	@port=$${PORT:-$(HOST_PORT)}; \
-	ss -ltnp | grep :$$port || echo "Nothing on :$$port"
+# Friendly aliases
+host:
+	@echo "Use one of:"
+	@echo "  make host-up     # runs the API on host (default :8081, HOST_LOG_DIR=./logs)"
+	@echo "  make host-down   # stops the host API"
+	@echo "  make host-logs   # tails host logs"
+
+host-up: run-host
+host-down: stop-host
+host-logs: logs-host
 
 # ---------------------------------
-# Docker mode (8080:8080)
+# Docker mode
 # ---------------------------------
-build-docker: ; $(COMPOSE) build --no-cache
-up:           ; $(COMPOSE) up --build -d
-restart:      ; $(COMPOSE) up --build -d --force-recreate
-down:         ; $(COMPOSE) down -v --remove-orphans --rmi all
-logs:         ; $(COMPOSE) logs -f api
-ps:           ; $(COMPOSE) ps
+build-docker:
+	$(COMPOSE) build --no-cache
 
-# ---------------------------------
-# Tests (Dockerized)
-# ---------------------------------
+up:
+	$(COMPOSE) up --build -d
+
+restart:
+	$(COMPOSE) up --build -d --force-recreate
+
+# Keep base images (e.g., postgres:16) to avoid 'Resource is still in use'
+down:
+	$(COMPOSE) down -v --remove-orphans
+
+# Remove compose-built images too (but still keeps shared base images)
+down-images:
+	$(COMPOSE) down -v --remove-orphans --rmi local
+
+# Aggressive cleanup: stop/remove any container using postgres:16, remove that image, then down-images
+nuke:
+	-@docker ps -a --filter ancestor=postgres:16 -q | xargs -r docker rm -f
+	-@docker rmi postgres:16 || true
+	$(COMPOSE) down -v --remove-orphans --rmi local
+
+logs:
+	$(COMPOSE) logs -f api
+
+ps:
+	$(COMPOSE) ps
+
 test-docker:
 	docker run --rm -v "$$(pwd)":/app -w /app $(GO_IMAGE) sh -lc \
 		"go mod download && go test -race -coverprofile=cover.out ./... && go tool cover -func=cover.out"
@@ -126,9 +150,18 @@ test-docker:
 # Utilities
 # ---------------------------------
 smoke:
+	# quick ping of health and targets using keys from $(ENV_FILE)
 	set -a; [ -f $(ENV_FILE) ] && . $(ENV_FILE); set +a; \
-	echo "== health";  curl -s -i -H "X-API-Key: $$PUBLIC_API_KEYS" http://localhost:8080/healthz | head -n1; \
-	echo "== targets"; curl -s -i -H "X-API-Key: $$PUBLIC_API_KEYS" http://localhost:8080/api/targets | head -n1
+	echo "== health"; \
+	curl -s -i -H "X-API-Key: $$PUBLIC_API_KEYS" http://localhost:8080/healthz | head -n1; \
+	echo "== targets"; \
+	curl -s -i -H "X-API-Key: $$PUBLIC_API_KEYS" http://localhost:8080/api/targets | head -n1
+
+reset-db:
+	@if [ -f scripts/reset_db.sh ]; then bash scripts/reset_db.sh; else \
+		echo "Running inline reset (TRUNCATE results, targets) on docker 'db'..."; \
+		$(COMPOSE) exec -T db bash -lc 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB" -v ON_ERROR_STOP=1 -c "TRUNCATE results, targets RESTART IDENTITY CASCADE;"'; \
+	fi
 
 sh-build:
 	docker run --rm -it -v "$$(pwd)":/app -w /app $(GO_IMAGE) bash

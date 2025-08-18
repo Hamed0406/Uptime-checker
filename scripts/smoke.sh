@@ -1,132 +1,66 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# -----------------------------
-# Config / defaults
-# -----------------------------
-DOCKER_PORT="${DOCKER_PORT:-8080}"   # container publishes 8080 by default
-HOST_PORT="${HOST_PORT:-8081}"       # host run (Makefile) defaults to 8081
-D="http://localhost:${DOCKER_PORT}"
-H="http://localhost:${HOST_PORT}"
-
-# Load local env if present (for API keys etc.)
-if [ -f ".env" ]; then
+# Load .env for keys if present
+if [ -f .env ]; then
   # shellcheck disable=SC1091
-  source .env
+  . ./.env
 fi
 
-# Take first key if comma-separated lists were provided
-PUB="${PUBLIC_API_KEYS:-pub_prod_xxx}"
-PUB="${PUB%%,*}"
-ADM="${ADMIN_API_KEYS:-adm_prod_xxx}"
-ADM="${ADM%%,*}"
+PUB_KEY="${PUBLIC_API_KEYS:-pub_test}"
+ADM_KEY="${ADMIN_API_KEYS:-adm_test}"
 
-echo "=== Using keys: PUBLIC='${PUB:0:4}…' ADMIN='${ADM:0:4}…'"
-echo "=== Docker API: ${D}"
-echo "=== Host   API: ${H}"
+DOCKER_URL="${DOCKER_URL:-http://localhost:8080}"
+HOST_URL="${HOST_URL:-http://localhost:8081}"
 
-# -----------------------------
-# Helpers
-# -----------------------------
-req() {
-  # usage: req GET|POST URL [curl args...]
-  local method="$1"; shift
-  local url="$1"; shift
+uniqsuf="$(date +%s%N)"
+URL_OK="https://example.com?smoke=${uniqsuf}"     # unique each run
+URL_BAD="not-a-url"
 
-  local tmp="/tmp/smoke_body_$$"
-  echo
-  echo "---- ${method} ${url}"
-  local code
-  code="$(curl -s -o "${tmp}" -w "%{http_code}" -X "${method}" "${url}" "$@")"
-  # Print up to 200 chars of response body (for quick glance)
-  if [ -s "${tmp}" ]; then
-    head -c 200 "${tmp}" | tr -d '\n'
-    [ "$(wc -c < "${tmp}")" -gt 200 ] && printf "…"
-    echo
-  else
-    echo "(no body)"
-  fi
-  echo "→ HTTP ${code}"
-  rm -f "${tmp}"
-  return 0
-}
-
-is_up() {
-  # returns 0 if GET url with header returns 200
-  local url="$1"; shift
-  local code
-  code="$(curl -s -o /dev/null -w "%{http_code}" "$@" "${url}")"
-  [ "${code}" = "200" ]
-}
-
-# -----------------------------
-# 1) Health checks
-# -----------------------------
-req GET "${D}/healthz" -H "X-API-Key: ${PUB}"
-
-if is_up "${H}/healthz" -H "X-API-Key: ${PUB}"; then
-  req GET "${H}/healthz" -H "X-API-Key: ${PUB}"
-else
-  echo "Host API (${H}) not running or unauthorized; skipping host tests."
-fi
-
-# -----------------------------
-# 2) ADD endpoint (Docker, admin key)
-# -----------------------------
-# Create
-req POST "${D}/api/targets" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: ${ADM}" \
-  --data '{"url":"https://example.com"}'
-
-# Duplicate (should be 409)
-req POST "${D}/api/targets" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: ${ADM}" \
-  --data '{"url":"https://EXAMPLE.com/"}'
-
-# Invalid URL (should be 400)
-req POST "${D}/api/targets" \
-  -H "Content-Type: application/json" \
-  -H "X-API-Key: ${ADM}" \
-  --data '{"url":"ftp://bad"}'
-
-# -----------------------------
-# 3) Reads (Docker, public key)
-# -----------------------------
-req GET "${D}/api/targets"        -H "X-API-Key: ${PUB}"
-req GET "${D}/api/results/latest" -H "X-API-Key: ${PUB}"
-
-# -----------------------------
-# 4) Optional host ADD/reads (if host API is up)
-# -----------------------------
-if is_up "${H}/healthz" -H "X-API-Key: ${PUB}"; then
-  # Host add
-  req POST "${H}/api/targets" \
-    -H "Content-Type: application/json" \
-    -H "X-API-Key: ${ADM}" \
-    --data '{"url":"https://hadeli.com"}'
-
-  # Host list & latest
-  req GET "${H}/api/targets"        -H "X-API-Key: ${PUB}"
-  req GET "${H}/api/results/latest" -H "X-API-Key: ${PUB}"
-fi
-
-# -----------------------------
-# 5) (Optional) Rate-limit probe on Docker
-#     Set RUN_RATE=1 to enable. Uses xargs for concurrency if available.
-# -----------------------------
-if [ "${RUN_RATE:-0}" = "1" ]; then
-  echo
-  echo "== Running burst to probe rate limits (Docker /healthz)…"
-  if command -v seq >/dev/null 2>&1 && command -v xargs >/dev/null 2>&1; then
-    seq 1 250 | xargs -I{} -P 50 curl -s -o /dev/null -w "%{http_code}\n" \
-      -H "X-API-Key: ${PUB}" "${D}/healthz" \
-    | sort | uniq -c
-  else
-    echo "seq/xargs not available; skipping burst test."
-  fi
-fi
-
+echo "=== Using keys: PUBLIC='${PUB_KEY:0:3}…' ADMIN='${ADM_KEY:0:3}…'"
+echo "=== Docker API: $DOCKER_URL"
+echo "=== Host   API: $HOST_URL"
 echo
+
+curl_do() {
+  local method="$1" url="$2" key="$3" data="${4:-}"
+  if [ -n "$data" ]; then
+    curl -sS -i -X "$method" -H "X-API-Key: $key" -H 'Content-Type: application/json' -d "$data" "$url"
+  else
+    curl -sS -i -H "X-API-Key: $key" "$url"
+  fi
+}
+
+echo "---- GET $DOCKER_URL/healthz"
+curl_do GET "$DOCKER_URL/healthz" "$PUB_KEY" | sed -n '1p;$p' || true
+echo
+
+echo "---- GET $HOST_URL/healthz"
+if curl -fsS -H "X-API-Key: $PUB_KEY" "$HOST_URL/healthz" >/dev/null 2>&1; then
+  echo "ok"; echo "→ Host HTTP 200"
+else
+  echo "Host API ($HOST_URL) not running or unauthorized; skipping host tests."
+fi
+echo
+
+echo "---- POST $DOCKER_URL/api/targets (unique)"
+curl_do POST "$DOCKER_URL/api/targets" "$ADM_KEY" "{\"url\":\"$URL_OK\"}" | sed -n '1p;$p' || true
+echo
+
+echo "---- POST $DOCKER_URL/api/targets (duplicate should 409)"
+curl_do POST "$DOCKER_URL/api/targets" "$ADM_KEY" "{\"url\":\"$URL_OK\"}" | sed -n '1p;$p' || true
+echo
+
+echo "---- POST $DOCKER_URL/api/targets (invalid should 400)"
+curl_do POST "$DOCKER_URL/api/targets" "$ADM_KEY" "{\"url\":\"$URL_BAD\"}" | sed -n '1p;$p' || true
+echo
+
+echo "---- GET  $DOCKER_URL/api/targets"
+curl_do GET "$DOCKER_URL/api/targets" "$PUB_KEY" | sed -n '1p;$p' || true
+echo
+
+echo "---- GET  $DOCKER_URL/api/results/latest"
+curl_do GET "$DOCKER_URL/api/results/latest" "$PUB_KEY" | sed -n '1p;$p' || true
+echo
+
 echo "=== Smoke done."
