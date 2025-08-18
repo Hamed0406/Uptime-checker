@@ -4,67 +4,66 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
 	// Server
-	Addr           string
-	AllowedOrigins []string // CORS allowlist
+	Addr    string // e.g. ":8080"
+	LogDir  string // e.g. "/var/log/uptime" in Docker, "./logs" on host
+	Origins []string
 
-	// Logging
-	LogDir string
-
-	// Store
-	DatabaseURL string
-
-	// Probing
-	HTTPTimeoutMS  int // per-request timeout (ms)
-	RetryAttempts  int
-	RetryBackoffMS int // backoff between attempts (ms)
-
-	// Auth (allow multiple keys)
+	// Auth
 	PublicAPIKeys []string
 	AdminAPIKeys  []string
 
-	// Scheduler (periodic re-checks)
-	CheckIntervalMS     int // how often to recheck (ms); 0 = disabled
-	MaxConcurrentChecks int // limit concurrent checks per tick
+	// Probe + scheduler
+	HTTPTimeout       time.Duration // per request timeout
+	RetryAttempts     int
+	RetryBackoff      time.Duration
+	CheckInterval     time.Duration // how often the scheduler runs
+	MaxConcurrentRuns int
+
+	// Rate limits
+	PublicRPM   int // requests/min for public routes
+	PublicBurst int
+	AdminRPM    int // requests/min for admin routes
+	AdminBurst  int
 }
 
-func FromEnv() *Config {
-	return &Config{
-		Addr:           getenv("ADDR", ":8080"),
-		AllowedOrigins: splitCSV(os.Getenv("ALLOWED_ORIGINS")),
+// FromEnv builds Config from environment with sensible defaults.
+func FromEnv() Config {
+	return Config{
+		Addr:    getenv("ADDR", ":8080"),
+		LogDir:  getenv("LOG_DIR", "/var/log/uptime"),
+		Origins: splitCSV(getenv("ALLOWED_ORIGINS", "")),
 
-		LogDir:      getenv("LOG_DIR", "./logs"),
-		DatabaseURL: os.Getenv("DATABASE_URL"),
+		PublicAPIKeys: splitCSV(getenv("PUBLIC_API_KEYS", "")),
+		AdminAPIKeys:  splitCSV(getenv("ADMIN_API_KEYS", "")),
 
-		HTTPTimeoutMS:  atoi("HTTP_TIMEOUT_MS", 5000),
-		RetryAttempts:  atoi("RETRY_ATTEMPTS", 1),
-		RetryBackoffMS: atoi("RETRY_BACKOFF_MS", 250),
+		HTTPTimeout:       msToDuration(getenv("HTTP_TIMEOUT_MS", "5000")),
+		RetryAttempts:     atoi(getenv("RETRY_ATTEMPTS", "3")),
+		RetryBackoff:      msToDuration(getenv("RETRY_BACKOFF_MS", "300")),
+		CheckInterval:     msToDuration(getenv("CHECK_INTERVAL_MS", "60000")),
+		MaxConcurrentRuns: atoi(getenv("MAX_CONCURRENT_CHECKS", "10")),
 
-		PublicAPIKeys: splitCSV(os.Getenv("PUBLIC_API_KEYS")),
-		AdminAPIKeys:  splitCSV(os.Getenv("ADMIN_API_KEYS")),
-
-		CheckIntervalMS:     atoi("CHECK_INTERVAL_MS", 60000), // default 1m
-		MaxConcurrentChecks: atoi("MAX_CONCURRENT_CHECKS", 10),
+		PublicRPM:   atoi(getenv("PUBLIC_RPM", "300")),
+		PublicBurst: atoi(getenv("PUBLIC_BURST", "150")),
+		AdminRPM:    atoi(getenv("ADMIN_RPM", "60")),
+		AdminBurst:  atoi(getenv("ADMIN_BURST", "30")),
 	}
 }
 
-func getenv(k, def string) string {
-	if v := os.Getenv(k); v != "" {
+func getenv(key, def string) string {
+	if v := os.Getenv(key); v != "" {
 		return v
 	}
 	return def
 }
 
-func atoi(k string, def int) int {
-	if v := os.Getenv(k); v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
-	}
-	return def
+func atoi(s string) int {
+	i, _ := strconv.Atoi(strings.TrimSpace(s))
+	return i
 }
 
 func splitCSV(s string) []string {
@@ -74,9 +73,18 @@ func splitCSV(s string) []string {
 	parts := strings.Split(s, ",")
 	out := make([]string, 0, len(parts))
 	for _, p := range parts {
-		if x := strings.TrimSpace(p); x != "" {
-			out = append(out, x)
+		p = strings.TrimSpace(p)
+		if p != "" {
+			out = append(out, p)
 		}
 	}
 	return out
+}
+
+func msToDuration(msStr string) time.Duration {
+	ms, err := strconv.Atoi(strings.TrimSpace(msStr))
+	if err != nil || ms < 0 {
+		ms = 0
+	}
+	return time.Duration(ms) * time.Millisecond
 }

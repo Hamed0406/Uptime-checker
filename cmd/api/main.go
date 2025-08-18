@@ -2,10 +2,10 @@ package main
 
 import (
 	"context"
-	"log"
+	"errors"
 	"net/http"
-	"os"
 	"os/signal"
+	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -15,7 +15,6 @@ import (
 	apimw "github.com/hamed0406/uptimechecker/internal/httpapi/middleware"
 	"github.com/hamed0406/uptimechecker/internal/logging"
 	"github.com/hamed0406/uptimechecker/internal/probe"
-	"github.com/hamed0406/uptimechecker/internal/repo"
 	"github.com/hamed0406/uptimechecker/internal/repo/memory"
 	"github.com/hamed0406/uptimechecker/internal/scheduler"
 )
@@ -23,84 +22,74 @@ import (
 func main() {
 	cfg := config.FromEnv()
 
-	logger, err := logging.NewLogger(cfg.LogDir)
+	// Logger (tee to stdout + file)
+	log, err := logging.NewLogger(cfg.LogDir)
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
-	defer func() { _ = logger.Sync() }()
+	defer func() { _ = log.Sync() }()
 
-	// ===== store: memory only (no Postgres for now) =====
-	var ts repo.TargetStore
-	var rs repo.ResultStore
-	mem := memory.New()
-	ts, rs = mem, mem
-	logger.Info("store_selected", zap.String("type", "memory"))
+	// Stores (in-memory)
+	store := memory.New()
 
-	// ===== probe: HTTP checker + optional retries =====
-	timeout := time.Duration(cfg.HTTPTimeoutMS) * time.Millisecond
-	if timeout <= 0 {
-		timeout = 10 * time.Second
-	}
-	base := probe.NewHTTPChecker(timeout)
-
-	var checker probe.Checker = base
-	if cfg.RetryAttempts > 1 {
-		checker = &probe.RetryChecker{
-			Inner:    base,
-			Attempts: cfg.RetryAttempts,
-			Backoff:  time.Duration(cfg.RetryBackoffMS) * time.Millisecond,
-		}
+	// Base HTTP checker + your existing retry wrapper (package probe)
+	base := probe.NewHTTPChecker(cfg.HTTPTimeout) // adjust if your constructor name differs
+	chk := &probe.RetryChecker{
+		Inner:    base,
+		Attempts: cfg.RetryAttempts,
+		Backoff:  cfg.RetryBackoff,
 	}
 
-	// ===== HTTP server & router =====
-	srv := httpapi.NewServer(logger, ts, rs, checker)
-	keys := apimw.Keys{Public: cfg.PublicAPIKeys, Admin: cfg.AdminAPIKeys}
-	router := srv.Router(keys, cfg.AllowedOrigins)
+	// Server + router
+	srv := httpapi.NewServer(log, store, store, chk)
 
-	httpSrv := &http.Server{
-		Addr:              cfg.Addr,
-		Handler:           router,
-		ReadHeaderTimeout: 10 * time.Second,
+	keys := apimw.Keys{
+		Public: cfg.PublicAPIKeys,
+		Admin:  cfg.AdminAPIKeys,
 	}
 
-	// ===== lifecycle =====
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	router := srv.Router(
+		keys,
+		cfg.Origins,
+		cfg.PublicRPM, cfg.PublicBurst,
+		cfg.AdminRPM, cfg.AdminBurst,
+	)
+
+	// Scheduler (periodic rechecks)
+	rechk := scheduler.NewRechecker(
+		log,
+		store,
+		store,
+		chk,
+		cfg.CheckInterval,
+		cfg.HTTPTimeout,
+		cfg.MaxConcurrentRuns,
+	)
+
+	// Lifecycle
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	// start server
+	if cfg.CheckInterval > 0 {
+		go rechk.Run(ctx)
+	}
+
+	server := &http.Server{
+		Addr:              cfg.Addr,
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
 	go func() {
-		logger.Info("api_listen", zap.String("addr", cfg.Addr))
-		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatal("http_listen", zap.Error(err))
+		log.Info("api_listen", zap.String("addr", cfg.Addr))
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal("listen_err", zap.Error(err))
 		}
 	}()
 
-	// start scheduler (if enabled)
-	if cfg.CheckIntervalMS > 0 {
-		rc := scheduler.NewRechecker(
-			logger,
-			ts,
-			rs,
-			checker,
-			time.Duration(cfg.CheckIntervalMS)*time.Millisecond,
-			time.Duration(cfg.HTTPTimeoutMS)*time.Millisecond,
-			cfg.MaxConcurrentChecks,
-		)
-		go rc.Run(ctx)
-		logger.Info("rechecker_started",
-			zap.Int("interval_ms", cfg.CheckIntervalMS),
-			zap.Int("max_concurrent", cfg.MaxConcurrentChecks),
-		)
-	} else {
-		logger.Info("rechecker_not_started", zap.String("reason", "CHECK_INTERVAL_MS=0"))
-	}
-
-	// wait for Ctrl+C
 	<-ctx.Done()
-
-	// graceful shutdown
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_ = httpSrv.Shutdown(shutdownCtx)
-	logger.Info("server_stopped")
+	_ = server.Shutdown(shutdownCtx)
+	log.Info("api_stopped")
 }

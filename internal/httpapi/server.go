@@ -30,10 +30,13 @@ func NewServer(l *zap.Logger, ts repo.TargetStore, rs repo.ResultStore, c probe.
 	return &Server{Logger: l, Targets: ts, Results: rs, Checker: c}
 }
 
-// Router wires CORS and API-key auth.
-// - Public/read routes require ANY key if keys are configured (else open in dev).
-// - Admin/write routes require an ADMIN key if configured (else open in dev).
-func (s *Server) Router(keys apimw.Keys, allowedOrigins []string) http.Handler {
+// Router wires CORS and API-key auth, with env-driven rate limits.
+func (s *Server) Router(
+	keys apimw.Keys,
+	allowedOrigins []string,
+	publicRPM, publicBurst int,
+	adminRPM, adminBurst int,
+) http.Handler {
 	r := chi.NewRouter()
 
 	// CORS: allowlist if provided; otherwise allow all (handy for local dev)
@@ -50,11 +53,10 @@ func (s *Server) Router(keys apimw.Keys, allowedOrigins []string) http.Handler {
 		r.Use(cors.AllowAll().Handler)
 	}
 
-	// Public/read routes (with rate limit)
+	// Public/read routes
 	r.Group(func(pub chi.Router) {
 		pub.Use(apimw.RequireAny(keys))
-		// 300 req/min, burst 150 (tune in middleware if you prefer env-driven)
-		pub.Use(apimw.RateLimit(300, 150))
+		pub.Use(apimw.RateLimit(publicRPM, publicBurst)) // env-driven limits
 
 		pub.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -66,11 +68,10 @@ func (s *Server) Router(keys apimw.Keys, allowedOrigins []string) http.Handler {
 		pub.Get("/api/results/latest", s.handleLatest)
 	})
 
-	// Admin/write routes (tighter rate limit)
+	// Admin/write routes
 	r.Group(func(adm chi.Router) {
 		adm.Use(apimw.RequireAdmin(keys))
-		// 60 req/min, burst 30
-		adm.Use(apimw.RateLimit(60, 30))
+		adm.Use(apimw.RateLimit(adminRPM, adminBurst))
 		adm.Post("/api/targets", s.handleAddTarget)
 	})
 

@@ -45,8 +45,13 @@ frontend/dist/
 frontend/build/
 
 
+# env / secrets
+.env
+.env.*
+!.env.example
 
-
-
-
-bin/*
+# build & runtime
+bin/
+logs/
+.run/
+cover.out
