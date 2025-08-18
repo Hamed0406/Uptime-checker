@@ -120,7 +120,7 @@ func (s *Server) handleAddTarget(w http.ResponseWriter, r *http.Request) {
 	cr := &domain.CheckResult{
 		TargetID:   t.ID,
 		Up:         out.Success,
-		HTTPStatus: 0, // not provided by current checker
+		HTTPStatus: out.StatusCode, // <-- now captured
 		LatencyMS:  out.LatencyMS,
 		Reason:     out.Message,
 		CheckedAt:  time.Now().UTC(),
@@ -130,6 +130,7 @@ func (s *Server) handleAddTarget(w http.ResponseWriter, r *http.Request) {
 	s.Logger.Info("added_target",
 		zap.String("url", normalized),
 		zap.Bool("up", out.Success),
+		zap.Int("status", out.StatusCode),
 		zap.Float64("latency_ms", out.LatencyMS),
 		zap.String("reason", out.Message),
 	)

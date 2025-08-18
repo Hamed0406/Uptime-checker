@@ -21,32 +21,35 @@ func (f *fakeChecker) Check(ctx context.Context, target string) CheckResult {
 	return r
 }
 
-func TestRetryChecker_SucceedsAfterRetry(t *testing.T) {
+func TestRetryChecker_SucceedsAfterRetry_PreservesStatus(t *testing.T) {
 	f := &fakeChecker{
 		results: []CheckResult{
-			{Success: false, Message: "first fail"},
-			{Success: true, Message: "ok"},
+			{Success: false, Message: "first fail", StatusCode: 503},
+			{Success: true, Message: "ok", StatusCode: 200},
 		},
 	}
 	rc := &RetryChecker{
 		Inner:    f,
 		Attempts: 3,
-		Backoff:  10 * time.Millisecond,
+		Backoff:  5 * time.Millisecond,
 	}
 	out := rc.Check(context.Background(), "https://example.com")
 	if !out.Success {
 		t.Fatalf("expected success after retry, got %+v", out)
 	}
+	if out.StatusCode != 200 {
+		t.Fatalf("want final status 200, got %d", out.StatusCode)
+	}
 	if out.Message == "" {
-		t.Fatalf("expected message to be set, got empty")
+		t.Fatalf("expected message, got empty")
 	}
 }
 
-func TestRetryChecker_AllFailAnnotates(t *testing.T) {
+func TestRetryChecker_AllFailAnnotatesMessage(t *testing.T) {
 	f := &fakeChecker{
 		results: []CheckResult{
-			{Success: false, Message: "fail1"},
-			{Success: false, Message: "fail2"},
+			{Success: false, Message: "fail1", StatusCode: 500},
+			{Success: false, Message: "fail2", StatusCode: 500},
 		},
 	}
 	rc := &RetryChecker{
@@ -58,7 +61,11 @@ func TestRetryChecker_AllFailAnnotates(t *testing.T) {
 	if out.Success {
 		t.Fatalf("expected failure, got success")
 	}
-	if out.Message == "" {
-		t.Fatalf("expected failure message annotation, got empty")
+	if out.StatusCode != 500 {
+		// last attempt's status code should remain
+		t.Fatalf("want status 500 from last attempt, got %d", out.StatusCode)
+	}
+	if out.Message == "" || out.Message == "fail2" {
+		t.Fatalf("expected annotated message about retries, got %q", out.Message)
 	}
 }

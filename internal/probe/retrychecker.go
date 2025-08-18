@@ -1,4 +1,3 @@
-// internal/probe/retrychecker.go
 package probe
 
 import (
@@ -22,11 +21,18 @@ func (r *RetryChecker) Check(ctx context.Context, target string) CheckResult {
 		if last.Success {
 			return last
 		}
-		if i < r.Attempts-1 {
-			time.Sleep(r.Backoff)
+		if i < r.Attempts-1 && r.Backoff > 0 {
+			select {
+			case <-ctx.Done():
+				return last
+			case <-time.After(r.Backoff):
+			}
 		}
 	}
-	// annotate message so you can see it was a retry series
-	last.Message = last.Message + " (after retries)"
+	if last.Message != "" {
+		last.Message = last.Message + " (after retries)"
+	} else {
+		last.Message = "failed (after retries)"
+	}
 	return last
 }

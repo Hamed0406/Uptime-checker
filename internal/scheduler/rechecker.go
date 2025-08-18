@@ -105,13 +105,12 @@ func (r *Rechecker) runOnce(ctx context.Context) {
 			cr := &domain.CheckResult{
 				TargetID:   t.ID,
 				Up:         out.Success,
-				HTTPStatus: 0, // not provided by current checker
+				HTTPStatus: out.StatusCode, // <-- now captured
 				LatencyMS:  out.LatencyMS,
 				Reason:     out.Message,
 				CheckedAt:  time.Now().UTC(),
 			}
-			// Use cctx so the append respects the same timeout.
-			if err := r.Results.Append(cctx, cr); err != nil {
+			if err := r.Results.Append(ctx, cr); err != nil {
 				r.Logger.Warn("rechecker_append_error",
 					zap.String("target_id", string(t.ID)),
 					zap.String("url", t.URL),
@@ -121,6 +120,7 @@ func (r *Rechecker) runOnce(ctx context.Context) {
 				r.Logger.Debug("rechecker_checked",
 					zap.String("target_id", string(t.ID)),
 					zap.String("url", t.URL),
+					zap.Int("status", out.StatusCode),
 					zap.Bool("up", out.Success),
 					zap.Float64("latency_ms", out.LatencyMS),
 					zap.String("reason", out.Message),
