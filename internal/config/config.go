@@ -9,8 +9,8 @@ import (
 
 type Config struct {
 	// Server
-	Addr    string // e.g. ":8080"
-	LogDir  string // e.g. "/var/log/uptime" in Docker, "./logs" on host
+	Addr    string   // e.g. ":8080"
+	LogDir  string   // e.g. "/var/log/uptime" in Docker, "./logs" on host
 	Origins []string
 
 	// Auth
@@ -29,6 +29,9 @@ type Config struct {
 	PublicBurst int
 	AdminRPM    int // requests/min for admin routes
 	AdminBurst  int
+
+	// Database
+	DatabaseURL string // if set, use Postgres; else in-memory
 }
 
 // FromEnv builds Config from environment with sensible defaults.
@@ -51,6 +54,8 @@ func FromEnv() Config {
 		PublicBurst: atoi(getenv("PUBLIC_BURST", "150")),
 		AdminRPM:    atoi(getenv("ADMIN_RPM", "60")),
 		AdminBurst:  atoi(getenv("ADMIN_BURST", "30")),
+
+		DatabaseURL: getenv("DATABASE_URL", ""),
 	}
 }
 

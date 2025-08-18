@@ -15,33 +15,48 @@ import (
 	apimw "github.com/hamed0406/uptimechecker/internal/httpapi/middleware"
 	"github.com/hamed0406/uptimechecker/internal/logging"
 	"github.com/hamed0406/uptimechecker/internal/probe"
+	"github.com/hamed0406/uptimechecker/internal/repo"
 	"github.com/hamed0406/uptimechecker/internal/repo/memory"
+	pgstore "github.com/hamed0406/uptimechecker/internal/repo/postgres"
 	"github.com/hamed0406/uptimechecker/internal/scheduler"
 )
 
 func main() {
 	cfg := config.FromEnv()
 
-	// Logger (tee to stdout + file)
 	log, err := logging.NewLogger(cfg.LogDir)
 	if err != nil {
 		panic(err)
 	}
 	defer func() { _ = log.Sync() }()
 
-	// Stores (in-memory)
-	store := memory.New()
+	var targets repo.TargetStore
+	var results repo.ResultStore
 
-	// Base HTTP checker + your existing retry wrapper (package probe)
-	base := probe.NewHTTPChecker(cfg.HTTPTimeout) // adjust if your constructor name differs
+	base := probe.NewHTTPChecker(cfg.HTTPTimeout)
 	chk := &probe.RetryChecker{
 		Inner:    base,
 		Attempts: cfg.RetryAttempts,
 		Backoff:  cfg.RetryBackoff,
 	}
 
-	// Server + router
-	srv := httpapi.NewServer(log, store, store, chk)
+	if cfg.DatabaseURL != "" {
+		pg, err := pgstore.New(context.Background(), cfg.DatabaseURL, log)
+		if err != nil {
+			log.Fatal("postgres_connect_error", zap.Error(err))
+		}
+		defer pg.Close()
+		targets = pg
+		results = pg
+		log.Info("repo_postgres_enabled")
+	} else {
+		mem := memory.New()
+		targets = mem
+		results = mem
+		log.Info("repo_memory_enabled")
+	}
+
+	srv := httpapi.NewServer(log, targets, results, chk)
 
 	keys := apimw.Keys{
 		Public: cfg.PublicAPIKeys,
@@ -55,18 +70,16 @@ func main() {
 		cfg.AdminRPM, cfg.AdminBurst,
 	)
 
-	// Scheduler (periodic rechecks)
 	rechk := scheduler.NewRechecker(
 		log,
-		store,
-		store,
+		targets,
+		results,
 		chk,
 		cfg.CheckInterval,
 		cfg.HTTPTimeout,
 		cfg.MaxConcurrentRuns,
 	)
 
-	// Lifecycle
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
