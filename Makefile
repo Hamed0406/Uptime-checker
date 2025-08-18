@@ -15,7 +15,9 @@ BIN         ?= bin/api
 .PHONY: help tidy fmt vet test race cover cover-html \
         build-host run-host logs-host stop-host \
         host host-up host-down host-logs \
-        build-docker up restart down down-images nuke logs ps test-docker smoke sh-build reset-db
+        build-docker up restart down down-images nuke logs ps test-docker \
+        smoke smoke-host smoke-docker sh-build reset-db \
+        up-db down-db dev-up
 
 # ---------------------------------
 # Help
@@ -40,8 +42,13 @@ help:
 	@echo "  nuke          - aggressive clean: stop rm any postgres:16 users, rmi it, down-images"
 	@echo "  logs          - follow docker logs for api service"
 	@echo "  ps            - show compose services"
+	@echo "  up-db         - start only the Postgres container"
+	@echo "  down-db       - stop & remove only the Postgres container + volume"
+	@echo "  dev-up        - start docker DB, then run host API bound to that DB"
 	@echo "  test-docker   - run tests in a Go container"
-	@echo "  smoke         - tiny health/targets smoke test against localhost:8080"
+	@echo "  smoke         - smoke both docker & host (if up)"
+	@echo "  smoke-docker  - smoke only docker"
+	@echo "  smoke-host    - smoke only host"
 	@echo "  reset-db      - truncate targets/results in docker Postgres (dev-only)"
 	@echo "  sh-build      - shell in a Go builder container (mounted repo)"
 
@@ -81,11 +88,12 @@ build-host:
 # Runs on :8081 by default (does NOT use ADDR/LOG_DIR from .env to avoid clashing with Docker).
 # Override with: PORT=9090 HOST_LOG_DIR=./logs make host-up
 run-host:
-	# Load .env for keys, then optional .env.host for host-specific overrides.
-	set -a; [ -f $(ENV_FILE) ] && . $(ENV_FILE); [ -f $(HOST_ENV) ] && . $(HOST_ENV); set +a; \
+	@set -a; [ -f $(ENV_FILE) ] && . $(ENV_FILE); [ -f $(HOST_ENV) ] && . $(HOST_ENV); set +a; \
 	export ADDR=":$${PORT:-8081}"; \
-	export LOG_DIR=$${HOST_LOG_DIR:-./logs}; mkdir -p "$$LOG_DIR"; \
+	export LOG_DIR="$${HOST_LOG_DIR:-./logs}"; mkdir -p "$$LOG_DIR"; \
+	if [ -n "$${HOST_DATABASE_URL+x}" ]; then export DATABASE_URL="$$HOST_DATABASE_URL"; fi; \
 	echo "Host run on $$ADDR (logs => $$LOG_DIR/uptime.log)"; \
+	if [ -n "$$DATABASE_URL" ]; then echo "Using DATABASE_URL (host): $$DATABASE_URL"; else echo "Using in-memory stores (host)"; fi; \
 	$(GO) run ./cmd/api
 
 logs-host:
@@ -142,6 +150,28 @@ logs:
 ps:
 	$(COMPOSE) ps
 
+# ---------------------------------
+# DB-only helpers (dockerized Postgres)
+# ---------------------------------
+up-db:
+	$(COMPOSE) up -d db
+
+down-db:
+	$(COMPOSE) stop db || true
+	$(COMPOSE) rm -f db || true
+	-docker volume rm $$(basename $$(pwd))_pgdata 2>/dev/null || true
+
+# Start docker DB then run host API using that DB.
+dev-up:
+	@set -a; [ -f $(ENV_FILE) ] && . $(ENV_FILE); set +a; \
+	$(COMPOSE) up -d db; \
+	HOST_LOG_DIR="./logs" \
+	HOST_DATABASE_URL="postgres://$${POSTGRES_USER:-uptime}:$${POSTGRES_PASSWORD:-uptimepass}@localhost:5432/$${POSTGRES_DB:-uptime}?sslmode=disable" \
+	$(MAKE) host-up
+
+# ---------------------------------
+# Tests
+# ---------------------------------
 test-docker:
 	docker run --rm -v "$$(pwd)":/app -w /app $(GO_IMAGE) sh -lc \
 		"go mod download && go test -race -coverprofile=cover.out ./... && go tool cover -func=cover.out"
@@ -150,12 +180,16 @@ test-docker:
 # Utilities
 # ---------------------------------
 smoke:
-	# quick ping of health and targets using keys from $(ENV_FILE)
-	set -a; [ -f $(ENV_FILE) ] && . $(ENV_FILE); set +a; \
-	echo "== health"; \
-	curl -s -i -H "X-API-Key: $$PUBLIC_API_KEYS" http://localhost:8080/healthz | head -n1; \
-	echo "== targets"; \
-	curl -s -i -H "X-API-Key: $$PUBLIC_API_KEYS" http://localhost:8080/api/targets | head -n1
+	@chmod +x scripts/smoke.sh || true
+	@./scripts/smoke.sh
+
+smoke-docker:
+	@chmod +x scripts/smoke.sh || true
+	@ONLY=docker ./scripts/smoke.sh
+
+smoke-host:
+	@chmod +x scripts/smoke.sh || true
+	@ONLY=host ./scripts/smoke.sh
 
 reset-db:
 	@if [ -f scripts/reset_db.sh ]; then bash scripts/reset_db.sh; else \
