@@ -30,7 +30,7 @@ func NewServer(l *zap.Logger, ts repo.TargetStore, rs repo.ResultStore, c probe.
 	return &Server{Logger: l, Targets: ts, Results: rs, Checker: c}
 }
 
-// Router wires CORS (from allowlist) and API-key auth.
+// Router wires CORS and API-key auth.
 // - Public/read routes require ANY key if keys are configured (else open in dev).
 // - Admin/write routes require an ADMIN key if configured (else open in dev).
 func (s *Server) Router(keys apimw.Keys, allowedOrigins []string) http.Handler {
@@ -50,9 +50,11 @@ func (s *Server) Router(keys apimw.Keys, allowedOrigins []string) http.Handler {
 		r.Use(cors.AllowAll().Handler)
 	}
 
-	// Public/read routes
+	// Public/read routes (with rate limit)
 	r.Group(func(pub chi.Router) {
 		pub.Use(apimw.RequireAny(keys))
+		// 300 req/min, burst 150 (tune in middleware if you prefer env-driven)
+		pub.Use(apimw.RateLimit(300, 150))
 
 		pub.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -64,9 +66,11 @@ func (s *Server) Router(keys apimw.Keys, allowedOrigins []string) http.Handler {
 		pub.Get("/api/results/latest", s.handleLatest)
 	})
 
-	// Admin/write routes
+	// Admin/write routes (tighter rate limit)
 	r.Group(func(adm chi.Router) {
 		adm.Use(apimw.RequireAdmin(keys))
+		// 60 req/min, burst 30
+		adm.Use(apimw.RateLimit(60, 30))
 		adm.Post("/api/targets", s.handleAddTarget)
 	})
 
@@ -83,23 +87,34 @@ func (s *Server) handleAddTarget(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid json"})
 		return
 	}
-	p.URL = strings.TrimSpace(p.URL)
-	if !isValidHTTPURL(p.URL) {
+	raw := strings.TrimSpace(p.URL)
+	if !isValidHTTPURL(raw) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid url"})
 		return
 	}
+	normalized := normalizeHTTPURL(raw)
 
-	t := &domain.Target{URL: p.URL, CreatedAt: time.Now().UTC()}
+	// Duplicate guard (store-agnostic)
+	if existing, err := s.Targets.List(r.Context()); err == nil {
+		for _, t := range existing {
+			if normalizeHTTPURL(t.URL) == normalized {
+				writeJSON(w, http.StatusConflict, map[string]any{"error": "target already exists"})
+				return
+			}
+		}
+	}
+
+	// Save
+	t := &domain.Target{URL: normalized, CreatedAt: time.Now().UTC()}
 	if err := s.Targets.Add(r.Context(), t); err != nil {
-		// If you later want to map duplicate URL errors to 409, do it here.
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "could not add target"})
 		return
 	}
 
-	// Probe once immediately (checker has its own timeout; we also guard with a context timeout)
+	// Immediate probe (checker has its own timeout; also guard with context timeout)
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	out := s.Checker.Check(ctx, p.URL)
+	out := s.Checker.Check(ctx, normalized)
 
 	cr := &domain.CheckResult{
 		TargetID:   t.ID,
@@ -109,10 +124,10 @@ func (s *Server) handleAddTarget(w http.ResponseWriter, r *http.Request) {
 		Reason:     out.Message,
 		CheckedAt:  time.Now().UTC(),
 	}
-	_ = s.Results.Append(r.Context(), cr)
+	_ = s.Results.Append(ctx, cr)
 
 	s.Logger.Info("added_target",
-		zap.String("url", p.URL),
+		zap.String("url", normalized),
 		zap.Bool("up", out.Success),
 		zap.Float64("latency_ms", out.LatencyMS),
 		zap.String("reason", out.Message),
@@ -145,17 +160,37 @@ func (s *Server) handleLatest(w http.ResponseWriter, r *http.Request) {
 // --- helpers ---
 
 func isValidHTTPURL(raw string) bool {
-	u, err := url.Parse(raw)
+	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
 		return false
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
 		return false
 	}
-	if u.Host == "" {
-		return false
+	return u.Host != ""
+}
+
+// normalizeHTTPURL canonicalizes host case, strips default ports, and trims trailing slash.
+func normalizeHTTPURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return raw
 	}
-	return true
+	u.Host = strings.ToLower(u.Host)
+
+	// strip default ports
+	if (u.Scheme == "http" && strings.HasSuffix(u.Host, ":80")) ||
+		(u.Scheme == "https" && strings.HasSuffix(u.Host, ":443")) {
+		if h, _, ok := strings.Cut(u.Host, ":"); ok {
+			u.Host = h
+		}
+	}
+
+	// remove trailing slash on root path
+	if u.Path == "/" {
+		u.Path = ""
+	}
+	return u.String()
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
