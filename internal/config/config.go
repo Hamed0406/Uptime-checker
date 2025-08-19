@@ -9,8 +9,8 @@ import (
 
 type Config struct {
 	// Server
-	Addr    string   // e.g. ":8080"
-	LogDir  string   // e.g. "/var/log/uptime" in Docker, "./logs" on host
+	Addr    string // e.g. ":8080"
+	LogDir  string // e.g. "/var/log/uptime" in Docker, "./logs" on host
 	Origins []string
 
 	// Auth

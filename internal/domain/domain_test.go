@@ -50,7 +50,7 @@ func TestCheckResult_JSONRoundTrip(t *testing.T) {
 		t.Fatalf("mismatch after round-trip:\nwant=%+v\ngot =%+v", want, got)
 	}
 	// float compare (tolerant)
-	if (got.LatencyMS - want.LatencyMS) > 1e-9 || (want.LatencyMS-got.LatencyMS) > 1e-9 {
+	if (got.LatencyMS-want.LatencyMS) > 1e-9 || (want.LatencyMS-got.LatencyMS) > 1e-9 {
 		t.Fatalf("latency mismatch: want=%v got=%v", want.LatencyMS, got.LatencyMS)
 	}
 }

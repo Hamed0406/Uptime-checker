@@ -151,11 +151,11 @@ SELECT DISTINCT ON (r.target_id)
 		lat := latency
 
 		out = append(out, repo.LatestRow{
-			TargetID:   targetID,   // repo.LatestRow expects string
+			TargetID:   targetID, // repo.LatestRow expects string
 			URL:        url,
 			Up:         up,
 			HTTPStatus: httpStatusPtr,
-			LatencyMS:  &lat,       // repo.LatestRow expects *float64
+			LatencyMS:  &lat, // repo.LatestRow expects *float64
 			Reason:     reason,
 			CheckedAt:  checkedAt,
 		})

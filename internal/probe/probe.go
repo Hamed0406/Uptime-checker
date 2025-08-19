@@ -5,9 +5,9 @@ import "context"
 // CheckResult is the unified result of a single probe.
 //
 // Fields:
-// - StatusCode: HTTP status code when available; 0 for transport/DNS errors.
-// - Name: optional label some checkers may use (e.g., DNS record type). It's harmless
-//   to keep here so existing code like dnschecker.go can set it.
+//   - StatusCode: HTTP status code when available; 0 for transport/DNS errors.
+//   - Name: optional label some checkers may use (e.g., DNS record type). It's harmless
+//     to keep here so existing code like dnschecker.go can set it.
 type CheckResult struct {
 	Success    bool
 	LatencyMS  float64

@@ -199,3 +199,15 @@ reset-db:
 
 sh-build:
 	docker run --rm -it -v "$$(pwd)":/app -w /app $(GO_IMAGE) bash
+
+.PHONY: verify preflight smoke-web
+
+verify: fmt vet test ## run static checks & unit tests
+	@echo "✔ verify ok"
+
+preflight: ## validate required env vars from .env (fails if misconfigured)
+	@set -a; [ -f $(ENV_FILE) ] && . $(ENV_FILE); set +a; \
+	$(GO) run ./cmd/preflight
+
+smoke-web: ## confirm web exposes admin key and API auth works
+	@bash scripts/smoke_web.sh
