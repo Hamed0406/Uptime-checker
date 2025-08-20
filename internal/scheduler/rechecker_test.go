@@ -36,6 +36,7 @@ type fakeResults struct {
 	mu   sync.Mutex
 	n    int
 	last *domain.CheckResult
+	rows []repo.LatestRow // for alerter tests
 }
 
 func (f *fakeResults) Append(ctx context.Context, cr *domain.CheckResult) error {
@@ -46,8 +47,14 @@ func (f *fakeResults) Append(ctx context.Context, cr *domain.CheckResult) error 
 	f.last = &cp
 	return nil
 }
+
 func (f *fakeResults) Latest(ctx context.Context) ([]repo.LatestRow, error) {
-	// not used in this test
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.n++
+	if f.rows != nil {
+		return f.rows, nil
+	}
 	return nil, nil
 }
 
