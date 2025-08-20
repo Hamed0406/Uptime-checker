@@ -23,10 +23,20 @@ type Alerter struct {
 	cfg AlerterConfig
 }
 
-func NewAlerter(results repo.ResultStore, alertDB repo.AlertStore, notifier interface {
-	Send(context.Context, string, string) error
-}, cfg AlerterConfig) *Alerter {
-	return &Alerter{results: results, alertDB: alertDB, notifier: notifier, cfg: cfg}
+func NewAlerter(
+	results repo.ResultStore,
+	alertDB repo.AlertStore,
+	notifier interface {
+		Send(context.Context, string, string) error
+	},
+	cfg AlerterConfig,
+) *Alerter {
+	return &Alerter{
+		results:  results,
+		alertDB:  alertDB,
+		notifier: notifier,
+		cfg:      cfg,
+	}
 }
 
 func (a *Alerter) Run(ctx context.Context) error {
@@ -53,52 +63,60 @@ func (a *Alerter) scanOnce(ctx context.Context) error {
 	}
 
 	now := time.Now()
+
 	for _, r := range rows {
 		rec, _ := a.alertDB.Get(ctx, r.TargetID)
 
+		// Has the up/down state changed compared to what we last recorded?
 		stateChanged := rec == nil || rec.LastState != r.Up
+
+		// Cooldown only matters for DOWN alerts (suppresses noisy repeats).
 		cooled := true
 		if rec != nil && rec.LastSentAt != nil {
 			cooled = now.Sub(*rec.LastSentAt) >= a.cfg.Cooldown
 		}
 
-		shouldNotify := false
-		if stateChanged && !r.Up {
-			shouldNotify = true // DOWN alert
-		} else if stateChanged && r.Up && a.cfg.AlertOnRecovery {
-			shouldNotify = true // Recovery alert
-		}
+		// Decide which alert (if any) should be sent.
+		downAlert := stateChanged && !r.Up && cooled
+		recoveryAlert := stateChanged && r.Up && a.cfg.AlertOnRecovery // bypass cooldown
 
-		if shouldNotify && cooled {
+		if downAlert || recoveryAlert {
+			// Title by state
 			title := "🔴 Target DOWN"
 			if r.Up {
 				title = "🟢 Target RECOVERED"
 			}
 
-			// HTTP
-			h := "n/a"
+			// HTTP code text
+			httpTxt := "n/a"
 			if r.HTTPStatus != nil {
-				h = fmt.Sprintf("%d", *r.HTTPStatus)
+				httpTxt = fmt.Sprintf("%d", *r.HTTPStatus)
 			}
 
-			// Latency (safe deref)
-			latency := "n/a"
+			// Latency text
+			latencyTxt := "n/a"
 			if r.LatencyMS != nil {
-				latency = fmt.Sprintf("%.0f ms", *r.LatencyMS)
+				latencyTxt = fmt.Sprintf("%.0f ms", *r.LatencyMS)
 			}
 
-			// Final text
+			// Final message
 			text := fmt.Sprintf(
 				"URL: %s\nHTTP: %s\nLatency: %s\nReason: %s\nChecked: %s",
-				r.URL, h, latency, r.Reason, r.CheckedAt.Format(time.RFC3339),
+				r.URL, httpTxt, latencyTxt, r.Reason, r.CheckedAt.Format(time.RFC3339),
 			)
 
-			_ = a.notifier.Send(ctx, title, text) // best-effort
+			// Best‑effort send and record the send time
+			_ = a.notifier.Send(ctx, title, text)
 			_ = a.alertDB.Set(ctx, r.TargetID, r.Up, now)
-		} else if stateChanged {
-			// record the new state but don't update last_sent_at
+			continue
+		}
+
+		// If state changed but we did not send (e.g., DOWN within cooldown or
+		// recovery alerts disabled), still record the new state without a send time.
+		if stateChanged {
 			_ = a.alertDB.Set(ctx, r.TargetID, r.Up, time.Time{})
 		}
 	}
+
 	return nil
 }
